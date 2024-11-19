@@ -1,7 +1,7 @@
 import gradio as gr
 import base64
-import os
-from openai import OpenAI
+import os 
+from mistralai import Mistral
 import json
 import fitz
 from PIL import Image
@@ -80,10 +80,7 @@ def process_pdf_img(pdf_fn: str):
         })
         message_parts.append({
             "type": "image_url",
-            "image_url": {
-                "url": image_url,
-                "detail": "high"
-            }
+            "image_url": image_url
         })
 
     pdf.close()
@@ -114,12 +111,68 @@ def encode_file(fn: str) -> list:
             content = str(content)
 
         if isImage:
-            user_msg_parts.append({"type": "image_url",
-                                "image_url":{"url": content}})
+            user_msg_parts.append({"type": "image_url", "image_url": content})
         else:
             user_msg_parts.append({"type": "text", "text": content})
 
     return user_msg_parts
+
+def bot(message, history, mistral_key, system_prompt, seed, temperature, max_tokens, model):
+    try:
+        client = Mistral(
+            api_key=mistral_key
+        )
+
+        history_mistral_format = []
+        user_msg_parts = []
+
+        if system_prompt:
+            history_mistral_format.append({"role": "system", "content": system_prompt})
+
+        for human, assi in history:
+            if human is not None:
+                if type(human) is tuple:
+                    user_msg_parts.extend(encode_file(human[0]))
+                else:
+                    user_msg_parts.append({"type": "text", "text": human})
+
+            if assi is not None:
+                if user_msg_parts:
+                    history_mistral_format.append({"role": "user", "content": user_msg_parts})
+                    user_msg_parts = []
+
+                history_mistral_format.append({"role": "assistant", "content": assi})
+
+        if message["text"]:
+            user_msg_parts.append({"type": "text", "text": message["text"]})
+        if message["files"]:
+            for file in message["files"]:
+                user_msg_parts.extend(encode_file(file))
+        history_mistral_format.append({"role": "user", "content": user_msg_parts})
+
+        if log_to_console:
+            print(f"br_prompt: {str(history_mistral_format)}")
+
+        response = client.chat.stream(
+            model=model,
+            messages=history_mistral_format,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+
+        partial_response = ""
+        for chunk in response:
+            if chunk.data.choices:
+                txt = chunk.data.choices[0].delta.content
+                if txt:
+                    partial_response += txt
+                    yield partial_response
+
+        if log_to_console:
+            print(f"br_result: {str(history)}")
+
+    except Exception as e:
+        raise gr.Error(f"Error: {str(e)}")
 
 def undo(history):
     history.pop()
@@ -135,143 +188,6 @@ def load_settings():
 def save_settings(acc, sec, prompt, temp, tokens, model):  
     # Dummy Python function, actual saving is done in JS  
     pass  
-
-def process_values_js():
-    return """
-    () => {
-        return ["oai_key", "system_prompt", "seed"];
-    }
-    """
-
-def bot(message, history, oai_key, system_prompt, seed, temperature, max_tokens, model):
-    try:
-        client = OpenAI(
-            api_key=oai_key
-        )
-
-        if model == "whisper":
-            result = ""
-            whisper_prompt = system_prompt
-            for human, assi in history:
-                if human is not None:
-                    if type(human) is tuple:
-                        pass
-                    else:
-                        whisper_prompt += f"\n{human}"
-                if assi is not None:
-                        whisper_prompt += f"\n{assi}"
-
-            if message["text"]:
-                whisper_prompt += message["text"]
-            if message.files:
-                for file in message.files:
-                    audio_fn = os.path.basename(file.path)
-                    with open(file.path, "rb") as f:
-                        transcription = client.audio.transcriptions.create(
-                            model="whisper-1", 
-                            prompt=whisper_prompt,
-                            file=f,
-                            response_format="text"
-                            )
-                    whisper_prompt += f"\n{transcription}"
-                    result += f"\n``` transcript {audio_fn}\n {transcription}\n```"
-            
-            yield result
-
-        elif model == "dall-e-3":
-            response = client.images.generate(
-                model=model,
-                prompt=message["text"],
-                size="1792x1024",
-                quality="hd",
-                n=1,
-            )
-            yield gr.Image(response.data[0].url)
-        else:
-            seed_i = None
-            if seed:
-                seed_i = int(seed)
-
-            if log_to_console:
-                print(f"bot history: {str(history)}")
-
-            history_openai_format = []
-            user_msg_parts = []
-
-            if system_prompt:
-                if not (model == "o1-mini" or model == "o1-preview"):
-                    role = "system"
-                else:
-                    role = "user"
-                history_openai_format.append({"role": role, "content": system_prompt})
-
-            for human, assi in history:
-                if human is not None:
-                    if type(human) is tuple:
-                        user_msg_parts.extend(encode_file(human[0]))
-                    else:
-                        user_msg_parts.append({"type": "text", "text": human})
-
-                if assi is not None:
-                    if user_msg_parts:
-                        history_openai_format.append({"role": "user", "content": user_msg_parts})
-                        user_msg_parts = []
-
-                    history_openai_format.append({"role": "assistant", "content": assi})
-
-            if message["text"]:
-                user_msg_parts.append({"type": "text", "text": message["text"]})
-            if message["files"]:
-                for file in message["files"]:
-                    user_msg_parts.extend(encode_file(file))
-            history_openai_format.append({"role": "user", "content": user_msg_parts})
-            user_msg_parts = []
-
-            if log_to_console:
-                print(f"br_prompt: {str(history_openai_format)}")
-
-            if model == "o1-preview" or model == "o1-mini":
-                response = client.chat.completions.create(
-                    model=model,
-                    messages= history_openai_format,
-                    seed=seed_i,
-                )
-
-                yield response.choices[0].message.content
-
-                if log_to_console:
-                        print(f"usage: {response.usage}")
-            else:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages= history_openai_format,
-                    temperature=temperature,
-                    seed=seed_i,
-                    max_tokens=max_tokens,
-                    stream=True,
-                    stream_options={"include_usage": True}
-                )
-
-                partial_response=""
-                for chunk in response:
-                    if chunk.choices:
-                        txt = ""
-                        for choice in chunk.choices:
-                            cont = choice.delta.content
-                            if cont:
-                                txt += cont
-
-                        partial_response += txt
-                        yield partial_response
-
-                    if chunk.usage and log_to_console:
-                        print(f"usage: {chunk.usage}")
-
-        if log_to_console:
-            print(f"br_result: {str(history)}")
-
-    except Exception as e:
-        raise gr.Error(f"Error: {str(e)}")
 
 def import_history(history, file):
     with open(file.name, mode="rb") as f:
@@ -294,23 +210,23 @@ def import_history(history, file):
         # Assume it's an old format with only history data
         history = import_data
 
-    return history, system_prompt.value  # Return system prompt value to be set in the UI
+    return history, system_prompt.value
 
 with gr.Blocks(delete_cache=(86400, 86400)) as demo:
-    gr.Markdown("# OAI Chat (Nils' Version™️)")
+    gr.Markdown("# Mistral Chat")
     with gr.Accordion("Startup"):
         gr.Markdown("""Use of this interface permitted under the terms and conditions of the 
-                    [MIT license](https://github.com/ndurner/oai_chat/blob/main/LICENSE).
-                    Third party terms and conditions apply, particularly
-                    those of the LLM vendor (OpenAI) and hosting provider (Hugging Face). This app and the AI models may make mistakes, so verify any outputs.""")
+                    [MIT license](https://github.com/ndurner/mistral_chat/blob/main/LICENSE).
+                    Third party terms and conditions apply. This app and the AI models may make mistakes, so verify any outputs.""")
 
-        oai_key = gr.Textbox(label="OpenAI API Key", elem_id="oai_key")
-        model = gr.Dropdown(label="Model", value="gpt-4-turbo", allow_custom_value=True, elem_id="model",
-                            choices=["gpt-4-turbo", "gpt-4o-2024-05-13", "o1-mini", "o1-preview", "chatgpt-4o-latest", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo-preview", "gpt-4-1106-preview", "gpt-4", "gpt-4-vision-preview", "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-3.5-turbo-1106", "whisper", "dall-e-3"])
-        system_prompt = gr.TextArea("You are a helpful yet diligent AI assistant. Answer faithfully and factually correct. Respond with 'I do not know' if uncertain.", label="System Prompt", lines=3, max_lines=250, elem_id="system_prompt")  
+        mistral_key = gr.Textbox(label="Mistral API Key", elem_id="mistral_key")
+        model = gr.Dropdown(label="Model", value="pixtral-large-latest", allow_custom_value=True, elem_id="model",
+                            choices=["pixtral-large-latest", "mistral-large-latest", "pixtral-12b-2409"])
+        system_prompt = gr.TextArea("You are a helpful yet diligent AI assistant. Answer faithfully and factually correct. Respond with 'I do not know' if uncertain.", 
+                                  label="System Prompt", lines=3, max_lines=250, elem_id="system_prompt")  
         seed = gr.Textbox(label="Seed", elem_id="seed")
-        temp = gr.Slider(0, 2, label="Temperature", elem_id="temp", value=1)
-        max_tokens = gr.Slider(1, 16384, label="Max. Tokens", elem_id="max_tokens", value=800)
+        temp = gr.Slider(0, 1, label="Temperature", elem_id="temp", value=0.7)
+        max_tokens = gr.Slider(1, 4096, label="Max. Tokens", elem_id="max_tokens", value=800)
         save_button = gr.Button("Save Settings")  
         load_button = gr.Button("Load Settings")  
         dl_settings_button = gr.Button("Download Settings")
@@ -318,7 +234,7 @@ with gr.Blocks(delete_cache=(86400, 86400)) as demo:
 
         load_button.click(load_settings, js="""  
             () => {  
-                let elems = ['#oai_key textarea', '#system_prompt textarea', '#seed textarea', '#temp input', '#max_tokens input', '#model'];
+                let elems = ['#mistral_key textarea', '#system_prompt textarea', '#seed textarea', '#temp input', '#max_tokens input', '#model'];
                 elems.forEach(elem => {
                     let item = document.querySelector(elem);
                     let event = new InputEvent('input', { bubbles: true });
@@ -328,9 +244,9 @@ with gr.Blocks(delete_cache=(86400, 86400)) as demo:
             }  
         """)
 
-        save_button.click(save_settings, [oai_key, system_prompt, seed, temp, max_tokens, model], js="""  
-            (oai, sys, seed, temp, ntok, model) => {  
-                localStorage.setItem('oai_key', oai);  
+        save_button.click(save_settings, [mistral_key, system_prompt, seed, temp, max_tokens, model], js="""  
+            (key, sys, seed, temp, ntok, model) => {  
+                localStorage.setItem('mistral_key', key);  
                 localStorage.setItem('system_prompt', sys);  
                 localStorage.setItem('seed', seed);  
                 localStorage.setItem('temp', document.querySelector('#temp input').value);  
@@ -339,18 +255,18 @@ with gr.Blocks(delete_cache=(86400, 86400)) as demo:
             }  
         """) 
 
-        control_ids = [('oai_key', '#oai_key textarea'),
-                       ('system_prompt', '#system_prompt textarea'),
-                       ('seed', '#seed textarea'),
-                       ('temp', '#temp input'),
-                       ('max_tokens', '#max_tokens input'),
-                       ('model', '#model')]
-        controls = [oai_key, system_prompt, seed, temp, max_tokens, model]
+        control_ids = [('mistral_key', '#mistral_key textarea'),
+                      ('system_prompt', '#system_prompt textarea'),
+                      ('seed', '#seed textarea'),
+                      ('temp', '#temp input'),
+                      ('max_tokens', '#max_tokens input'),
+                      ('model', '#model')]
+        controls = [mistral_key, system_prompt, seed, temp, max_tokens, model]
 
-        dl_settings_button.click(None, controls, js=generate_download_settings_js("oai_chat_settings.bin", control_ids))
+        dl_settings_button.click(None, controls, js=generate_download_settings_js("mistral_chat_settings.bin", control_ids))
         ul_settings_button.click(None, None, None, js=generate_upload_settings_js(control_ids))
 
-    chat = gr.ChatInterface(fn=bot, multimodal=True, additional_inputs=controls, autofocus = False)
+    chat = gr.ChatInterface(fn=bot, multimodal=True, additional_inputs=controls, autofocus=False)
     chat.textbox.file_count = "multiple"
     chatbot = chat.chatbot
     chatbot.show_copy_button = True
@@ -362,7 +278,7 @@ with gr.Blocks(delete_cache=(86400, 86400)) as demo:
             txt_dmp = gr.Textbox("Dump")
             dmp_btn.click(dump, inputs=[chatbot], outputs=[txt_dmp])
 
-    with gr.Accordion("Import/Export", open = False):
+    with gr.Accordion("Import/Export", open=False):
         import_button = gr.UploadButton("History Import")
         export_button = gr.Button("History Export")
         export_button.click(lambda: None, [chatbot, system_prompt], js="""

@@ -1,5 +1,5 @@
 ---
-title: OAI Chat
+title: Mistral Chat
 emoji: 🤖
 colorFrom: yellow
 colorTo: gray
@@ -10,16 +10,16 @@ pinned: false
 license: mit
 ---
 
-# OAI Chat
+# Mistral Chat
 
 Chat interface based on OpenAI transformer models. \
 Features:
- * Image upload (support for vision via gpt-4-vision)
+ * Image upload (support for vision via Pixtral)
  * Word file (DOCX) upload
- * PDF file support (via image rendering & GPT-4V)
+ * PDF file support (via image rendering & Pixtral)
  * Plaintext file upload
  * chat history download
  * file download
    * example: download an ICS calendar file the model has created for you
 * streaming chat
-* image generation (via DALL-E 3)
+
